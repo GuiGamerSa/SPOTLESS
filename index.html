@@ -131,6 +131,14 @@
   .btn-next { background:var(--green); border:none; color:#000; font-family:'DM Mono',monospace; font-size:.72rem; font-weight:500; letter-spacing:.1em; text-transform:uppercase; padding:11px 26px; border-radius:7px; cursor:pointer; }
   .btn-next:hover { background:#22d160; }
 
+  .btn-random-toggle {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    font-family: 'DM Mono', monospace; font-size: .68rem; padding: 5px 14px;
+    border-radius: 20px; cursor: pointer; transition: all .2s; letter-spacing: .04em;
+  }
+  .btn-random-toggle:hover { border-color: var(--green); color: var(--green); }
+  .btn-random-toggle.active { border-color: var(--green); color: var(--green); background: rgba(29,185,84,.08); }
+
   .toast { position:fixed; bottom:28px; left:50%; transform:translateX(-50%) translateY(70px); background:var(--surface); border:1px solid var(--border); color:var(--text); font-size:.76rem; padding:11px 22px; border-radius:7px; z-index:9999; transition:transform .3s; white-space:nowrap; }
   .toast.show { transform:translateX(-50%) translateY(0); }
 </style>
@@ -209,6 +217,9 @@
         <svg id="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
       </button>
       <div class="dur-info">Trecho: <span id="dur-allowed">1s</span></div>
+      <button class="btn-random-toggle" id="btn-random-toggle" onclick="toggleRandomStart()" title="Alternar posição de início">
+        🎯 Início da música
+      </button>
     </div>
     <div class="guesses-list" id="guesses-list"></div>
     <div class="search-zone">
@@ -271,7 +282,7 @@ let accessToken=null, userProfile=null, trackPool=[], currentTrack=null;
 let guessCount=0, maxGuesses=6, gameScore=0, roundNum=0, totalRounds=5;
 let usedTrackIds=new Set(), selectedSuggestion=null;
 let sdkReady=false, player=null, deviceId=null;
-let audioTimer=null, isPlaying=false;
+let audioTimer=null, isPlaying=false, randomStart=false;
 const durations=[1,2,4,7,11,16];
 
 // ═══ SCREENS ═══
@@ -318,7 +329,38 @@ async function exchangeCode(code){
     body:new URLSearchParams({client_id:CLIENT_ID,grant_type:'authorization_code',code,redirect_uri:REDIRECT_URI,code_verifier:sessionStorage.getItem('pkce_verifier')})
   });
   if(!r.ok) throw new Error('token fail');
-  return (await r.json()).access_token;
+  const data=await r.json();
+  if(data.refresh_token) localStorage.setItem('spotless_refresh_token',data.refresh_token);
+  // Store expiry time
+  const expiresAt=Date.now()+(data.expires_in-60)*1000;
+  localStorage.setItem('spotless_token_expiry',expiresAt);
+  localStorage.setItem('spotless_access_token',data.access_token);
+  return data.access_token;
+}
+
+async function refreshAccessToken(){
+  const refreshToken=localStorage.getItem('spotless_refresh_token');
+  if(!refreshToken) return null;
+  const r=await fetch('https://accounts.spotify.com/api/token',{
+    method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({client_id:CLIENT_ID,grant_type:'refresh_token',refresh_token:refreshToken})
+  });
+  if(!r.ok){ localStorage.removeItem('spotless_refresh_token'); return null; }
+  const data=await r.json();
+  if(data.refresh_token) localStorage.setItem('spotless_refresh_token',data.refresh_token);
+  const expiresAt=Date.now()+(data.expires_in-60)*1000;
+  localStorage.setItem('spotless_token_expiry',expiresAt);
+  localStorage.setItem('spotless_access_token',data.access_token);
+  return data.access_token;
+}
+
+async function getValidToken(){
+  const expiry=parseInt(localStorage.getItem('spotless_token_expiry')||'0');
+  if(Date.now()<expiry && accessToken) return accessToken;
+  // Try to refresh
+  const newToken=await refreshAccessToken();
+  if(newToken){ accessToken=newToken; return newToken; }
+  return null;
 }
 async function handleCallback(){
   const p=new URLSearchParams(location.search), code=p.get('code'), err=p.get('error');
@@ -328,24 +370,40 @@ async function handleCallback(){
   showScreen('screen-loading'); setLoading('Autenticando...');
   try{
     accessToken=await exchangeCode(code);
-    sessionStorage.setItem('spotify_token',accessToken);
+    // Store in localStorage for persistence across sessions
+    localStorage.setItem('spotless_access_token',accessToken);
     sessionStorage.removeItem('pkce_verifier');
     return true;
   }catch(e){console.error(e);showToast('Erro na autenticação.');return false;}
 }
 function disconnect(){
   player?.disconnect(); player=null; deviceId=null; sdkReady=false;
-  accessToken=null; sessionStorage.removeItem('spotify_token');
+  accessToken=null;
+  localStorage.removeItem('spotless_access_token');
+  localStorage.removeItem('spotless_refresh_token');
+  localStorage.removeItem('spotless_token_expiry');
+  sessionStorage.removeItem('spotify_token');
   trackPool=[]; usedTrackIds.clear(); gameScore=0; roundNum=0;
   clearTimeout(audioTimer); isPlaying=false;
   showScreen('screen-landing'); checkConfig();
 }
 
 // ═══ API ═══
-async function api(path,opts={}){
+async function api(path,opts={},retry=true){
+  // Ensure token is valid before request
+  const token=await getValidToken();
+  if(!token){disconnect();throw new Error('no token');}
+  accessToken=token;
   const r=await fetch(`https://api.spotify.com/v1${path}`,{...opts,headers:{Authorization:`Bearer ${accessToken}`,...(opts.headers||{})}});
-  if(r.status===401){disconnect();throw new Error('401');}
-  if(r.status===204||r.status===202||r.status===200&&r.headers.get('content-length')==='0') return null;
+  if(r.status===401){
+    if(retry){
+      // Force refresh and retry once
+      localStorage.removeItem('spotless_token_expiry');
+      return api(path,opts,false);
+    }
+    disconnect(); throw new Error('401');
+  }
+  if(r.status===204||r.status===202||(r.status===200&&r.headers.get('content-length')==='0')) return null;
   const text=await r.text();
   try{return JSON.parse(text);}catch{return null;}
 }
@@ -461,13 +519,21 @@ function buildWaveform(){
 }
 function updateDur(){document.getElementById('dur-allowed').textContent=durations[Math.min(guessCount,durations.length-1)]+'s';}
 
+function toggleRandomStart(){
+  randomStart=!randomStart;
+  const btn=document.getElementById('btn-random-toggle');
+  btn.textContent=randomStart?'🎲 Posição aleatória':'🎯 Início da música';
+  btn.classList.toggle('active',randomStart);
+  showToast(randomStart?'Modo aleatório ativado 🎲':'Começa do início 🎯');
+}
+
 // ═══ PLAYBACK ═══
 async function togglePlay(){if(isPlaying) await stopPlayback(); else await startPlayback();}
 
 async function startPlayback(){
   if(!sdkReady||!deviceId){showToast('Player não está pronto. Aguarde...');return;}
   const dur=durations[Math.min(guessCount,durations.length-1)];
-  const startMs=(20+Math.floor(Math.random()*40))*1000;
+  const startMs = randomStart ? (20+Math.floor(Math.random()*40))*1000 : 0;
   try{
     await api(`/me/player/play?device_id=${deviceId}`,{
       method:'PUT',headers:{'Content-Type':'application/json'},
@@ -588,9 +654,18 @@ window.addEventListener('load',async()=>{
   checkConfig();
   const p=new URLSearchParams(location.search);
   if(p.get('code')||p.get('error')){const ok=await handleCallback();if(ok){loadUserData();return;}showScreen('screen-landing');return;}
+  // Check localStorage for persisted token/refresh_token
+  const storedToken=localStorage.getItem('spotless_access_token');
+  const storedRefresh=localStorage.getItem('spotless_refresh_token');
+  if(storedRefresh||storedToken){
+    console.log('Found stored credentials, loading user data...');
+    accessToken=storedToken||'';
+    loadUserData();
+    return;
+  }
+  // Legacy sessionStorage check
   const stored=sessionStorage.getItem('spotify_token');
   if(stored){
-    console.log('Found stored token, loading user data...');
     accessToken=stored;
     loadUserData();
     return;
