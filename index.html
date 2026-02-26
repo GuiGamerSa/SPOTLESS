@@ -172,9 +172,9 @@
       <div class="rule-card"><div class="rule-num">∞</div><div class="rule-desc">das suas top músicas</div></div>
     </div>
     <div class="notice">🎧 Requer <strong>Spotify Premium</strong> — o jogo toca as músicas diretamente no seu navegador.</div>
-    <button class="btn-spotify" id="btn-connect" onclick="connectSpotify()">
+    <button class="btn-spotify" id="btn-connect" onclick="landingButtonClick()">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
-      Entrar com Spotify
+      <span id="btn-connect-text">Entrar com Spotify</span>
     </button>
   </div>
 </div>
@@ -297,6 +297,33 @@ function checkConfig(){
   const warn=document.getElementById('config-warning'), btn=document.getElementById('btn-connect');
   if(!CLIENT_ID){warn.style.display='block';btn.style.display='none';}
   else{warn.style.display='none';btn.style.display='inline-flex';}
+  updateLandingButton();
+}
+
+function updateLandingButton(){
+  const isLoggedIn = !!(localStorage.getItem('spotless_refresh_token') || localStorage.getItem('spotless_access_token') || accessToken);
+  const textEl = document.getElementById('btn-connect-text');
+  if(!textEl) return;
+  if(isLoggedIn && trackPool.length > 0){
+    textEl.textContent = '🔄 Novo Jogo';
+  } else if(isLoggedIn){
+    textEl.textContent = '▶ Continuar';
+  } else {
+    textEl.textContent = 'Entrar com Spotify';
+  }
+}
+
+function landingButtonClick(){
+  const isLoggedIn = !!(localStorage.getItem('spotless_refresh_token') || localStorage.getItem('spotless_access_token') || accessToken);
+  if(isLoggedIn && trackPool.length > 0){
+    // Already has data, just restart
+    restartGame();
+  } else if(isLoggedIn){
+    // Has token but no data, reload
+    loadUserData();
+  } else {
+    connectSpotify();
+  }
 }
 function saveClientId(){
   const v=document.getElementById('client-id-input').value.trim();
@@ -439,6 +466,7 @@ function updateUserUI(){
   document.getElementById('header-user').style.display='flex';
   document.getElementById('header-name').textContent=name;
   document.getElementById('game-username').textContent=name;
+  updateLandingButton();
 }
 
 // ═══ SDK ═══
@@ -638,11 +666,48 @@ function showResultScreen(won,pts){
   updateUserUI(); showScreen('screen-result');
 }
 function copyShare(){navigator.clipboard.writeText(document.getElementById('share-text').textContent).then(()=>showToast('Copiado! 🎉')).catch(()=>showToast('Erro ao copiar'));}
-function nextRound(){if(roundNum>=totalRounds)endGame();else startRound();}
+function nextRound(){
+  // Reset onclick in case it was changed to restartGame
+  document.getElementById('btn-next').onclick = nextRound;
+  if(roundNum>=totalRounds) endGame();
+  else startRound();
+}
 function endGame(){
-  showToast(`Fim de jogo! Pontuação: ${gameScore} pts 🎉`,4000);
+  // Show final score screen instead of going back to landing
+  showFinalScreen();
+}
+
+function showFinalScreen(){
+  // Reuse result screen for final summary
+  const won = false; // just show summary
+  document.getElementById('result-art').src = currentTrack?.album?.images?.[0]?.url||'';
+  document.getElementById('result-verdict').textContent = 'FIM DE JOGO!';
+  document.getElementById('result-verdict').className = 'result-verdict win';
+  document.getElementById('result-track').textContent = currentTrack?.name||'';
+  document.getElementById('result-artist').textContent = currentTrack?.artists?.map(a=>a.name).join(', ')||'';
+  document.getElementById('result-pts').textContent = gameScore;
+  document.getElementById('result-total').textContent = gameScore;
+  document.getElementById('result-round-label').textContent = `${totalRounds} rodadas completas`;
+
+  const emojis=Array.from({length:maxGuesses},(_,i)=>{const s=document.getElementById('slot-'+i);if(!s)return'⬜';if(s.classList.contains('correct'))return'🟩';if(s.classList.contains('wrong'))return'🟥';if(s.classList.contains('skipped'))return'⬛';return'⬜';}).join('');
+  document.getElementById('share-text').textContent=`SPOTLESS — Fim de Jogo\n${totalRounds} rodadas\nPontuação final: ${gameScore} pts 🎉`;
+
+  // Change next button to "New Game"
+  const btn = document.getElementById('btn-next');
+  btn.textContent = '🔄 Novo Jogo';
+  btn.onclick = restartGame;
+
+  updateUserUI();
+  showScreen('screen-result');
+}
+
+function restartGame(){
   player?.pause();
-  setTimeout(()=>{gameScore=0;roundNum=0;usedTrackIds.clear();showScreen('screen-landing');updateUserUI();},1200);
+  gameScore=0; roundNum=0; usedTrackIds.clear();
+  // Reshuffle pool
+  for(let i=trackPool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[trackPool[i],trackPool[j]]=[trackPool[j],trackPool[i]];}
+  totalRounds=Math.min(5,trackPool.length);
+  startRound();
 }
 
 // ═══ TOAST ═══
